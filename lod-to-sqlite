@@ -1,0 +1,157 @@
+#!/usr/bin/env node
+
+"use strict";
+
+const { glob } = require("glob");
+const { promisify } = require("util");
+const fsPromises = require("fs/promises");
+const path = require("path");
+const sqlite3 = require("sqlite3").verbose();
+
+const [worldDir = "."] = process.argv.slice(2);
+
+function toWorldGenStepString(value) {
+  switch (value) {
+    case 0:
+      return "EMPTY";
+    case 1:
+      return "STRUCTURE_START";
+    case 2:
+      return "STRUCTURE_REFERENCE";
+    case 3:
+      return "BIOMES";
+    case 4:
+      return "NOISE";
+    case 5:
+      return "SURFACE";
+    case 6:
+      return "CARVERS";
+    case 7:
+      return "LIQUID_CARVERS";
+    case 8:
+      return "FEATURES";
+    case 9:
+      return "LIGHT";
+    default:
+      throw new Error(`Invalid worldGenStep ${value}`);
+  }
+}
+
+function toDataTypeString(dataTypeId) {
+  switch (dataTypeId) {
+    case 1184712205n:
+      return "CompleteFullDataSource";
+    case -992901851n:
+      return "HighDetailIncompleteFullDataSource";
+    case -845690089n:
+      return "LowDetailIncompleteFullDataSource";
+    default:
+      throw new Error(`Invalid dataTypeId ${dataTypeId}`);
+  }
+}
+
+function readLodFile(path) {
+  return fsPromises.readFile(path).then(function (buffer) {
+    const metadata = {
+      identity: buffer.toString("ascii", 0, 4),
+      x: buffer.readInt32BE(4),
+      // y: buffer.readInt32BE(8), // Unused
+      z: buffer.readInt32BE(12),
+      checksum: buffer.readInt32BE(16),
+      detailLevel: buffer.readInt8(20),
+      dataLevel: buffer.readInt8(21),
+      loaderVersion: buffer.readInt8(22),
+      worldGenStep: buffer.readInt8(23),
+      dataTypeId: buffer.readBigInt64BE(24),
+      dataVersion: buffer.readBigInt64BE(32),
+    };
+
+    if (metadata.identity !== "DHv0") {
+      throw new Error("Invalid identity code");
+    }
+
+    const data = buffer.subarray(64);
+
+    return { metadata, data };
+  });
+}
+
+function lodToRow({ metadata, data }) {
+  return {
+    DhSectionPos: `[${metadata.detailLevel},${metadata.x},${metadata.z}]`,
+    DataDetailLevel: metadata.dataLevel,
+    Checksum: metadata.checksum,
+    DataVersion: metadata.dataVersion,
+    WorldGenStep: toWorldGenStepString(metadata.worldGenStep),
+    DataType: toDataTypeString(metadata.dataTypeId),
+    BinaryDataFormatVersion: metadata.loaderVersion,
+    Data: data,
+  };
+}
+
+function insertRow(dimension, db, row) {
+  const columns = Object.keys(row);
+  const values = Object.values(row);
+  return new Promise(function (resolve, reject) {
+    db.run(
+      `INSERT OR IGNORE INTO DhFullData(${columns}) VALUES(${values.map(
+        () => "?"
+      )})`,
+      values,
+      function (err) {
+        if (err) {
+          reject(err);
+          return;
+        }
+        if (this.changes) {
+          console.log("Converted", dimension, row.DhSectionPos);
+        }
+        resolve(null);
+      }
+    );
+  });
+}
+
+function processLodFile(dimension, path, db) {
+  return readLodFile(path)
+    .then(lodToRow)
+    .then((row) => insertRow(dimension, db, row))
+    .catch(function (err) {
+      console.log("Skipping %s: %s", path, err.message);
+    });
+}
+
+function processDimensionFolder(dimensionFolder) {
+  console.log("***", dimensionFolder);
+  const lodFilesPattern = path.join(worldDir, dimensionFolder, "data", "*.lod");
+  return glob(lodFilesPattern).then(function (paths) {
+    if (!paths.length) {
+      return;
+    }
+    const databasePath = path.join(
+      worldDir,
+      dimensionFolder,
+      "DistantHorizons.sqlite"
+    );
+    const db = new sqlite3.Database(databasePath);
+    return Promise.all(
+      paths.map((path) => processLodFile(dimensionFolder, path, db))
+    ).then(function () {
+      const dbClose = promisify(db.close.bind(db));
+      return dbClose();
+    });
+  });
+}
+
+const singlePlayerDimensionFolders = ["", "DIM1", "DIM-1"].map((dimension) =>
+  path.join(dimension, "data")
+);
+const multiplayerDimensionFolders = ["overworld", "the_nether", "the_end"];
+Promise.all(
+  [singlePlayerDimensionFolders, multiplayerDimensionFolders]
+    .flat()
+    .map(processDimensionFolder)
+)
+  .then(() => "Done!")
+  .catch((err) => err.message)
+  .then(console.log);

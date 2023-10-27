@@ -1,0 +1,13 @@
+{
+  "name": "dh-lod-to-sqlite",
+  "version": "1.0.0",
+  "bin": "./lod-to-sqlite",
+  "dependencies": {
+    "glob": "^10.3.10",
+    "sqlite3": "https://github.com/juanrgm/node-sqlite3/tarball/int64-support"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "prettier": {}
+}
